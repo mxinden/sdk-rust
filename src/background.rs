@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::stream::StreamExt;
 use influxdb::{Client, WriteQuery};
+use log::debug;
 use soketto::handshake::ServerResponse;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
@@ -197,6 +198,7 @@ impl BackgroundTask {
 
     pub async fn run(mut self) {
         loop {
+            debug!("Selecting on websocket and client_rx.");
             tokio::select! {
                 res = self.websocket_rx.next() => match res {
                     Some(res) => match res {
@@ -214,7 +216,7 @@ impl BackgroundTask {
                 cmd = self.client_rx.recv() => match cmd {
                     Some(cmd) => self.command(cmd).await,
                     None => {
-                        log::debug!("Client command sender dropped. Background task shutting down.");
+                        debug!("Client command sender dropped. Background task shutting down.");
                         return;
                     },
                 },
@@ -224,6 +226,8 @@ impl BackgroundTask {
 
     async fn command(&mut self, cmd: Command) {
         let id = self.next_id();
+
+        debug!("Got command {:?}.", cmd);
 
         match cmd {
             Command::Publish {
@@ -274,7 +278,7 @@ impl BackgroundTask {
             }
             Command::WaitNetworkInitializedBarrier { sender } => {
                 if !self.params.test_sidecar {
-                    log::debug!(
+                    debug!(
                         "Running in environment without network side car. \
                         Skipping wait for network."
                     );
@@ -399,7 +403,9 @@ impl BackgroundTask {
         self.send(request).await.expect(WEBSOCKET_RECEIVER);
 
         self.pending_req
-            .insert(id, PendingRequest::PublishOrSignal { sender });
+            .insert(id, PendingRequest::PublishOrSignal { sender })
+            .is_some()
+            .then(|| panic!("Expected id to be unique."));
     }
 
     async fn subscribe(
@@ -417,7 +423,9 @@ impl BackgroundTask {
         self.send(request).await.expect(WEBSOCKET_RECEIVER);
 
         self.pending_req
-            .insert(id, PendingRequest::Subscribe { stream });
+            .insert(id, PendingRequest::Subscribe { stream })
+            .is_some()
+            .then(|| panic!("Expected id to be unique."));
     }
 
     async fn signal(
@@ -435,7 +443,9 @@ impl BackgroundTask {
         self.send(request).await.expect(WEBSOCKET_RECEIVER);
 
         self.pending_req
-            .insert(id, PendingRequest::PublishOrSignal { sender });
+            .insert(id, PendingRequest::PublishOrSignal { sender })
+            .is_some()
+            .then(|| panic!("Expected id to be unique."));
     }
 
     async fn barrier(
@@ -454,7 +464,9 @@ impl BackgroundTask {
         self.send(request).await.expect(WEBSOCKET_RECEIVER);
 
         self.pending_req
-            .insert(id, PendingRequest::Barrier { sender });
+            .insert(id, PendingRequest::Barrier { sender })
+            .is_some()
+            .then(|| panic!("Expected id to be unique."));
     }
 
     async fn response(&mut self, res: Response) {
@@ -464,8 +476,16 @@ impl BackgroundTask {
 
         let pending_req = match self.pending_req.remove(&idx) {
             Some(req) => req,
-            None => return,
+            None => {
+                debug!("Received response {:?} without pending request.", response);
+                return;
+            }
         };
+
+        debug!(
+            "Received response {:?}, forwarding to pending request channel.",
+            response
+        );
 
         match (pending_req, response) {
             (PendingRequest::Barrier { sender }, ResponseType::Error(error)) => {
@@ -480,7 +500,9 @@ impl BackgroundTask {
             (PendingRequest::Subscribe { stream }, ResponseType::Subscribe(msg)) => {
                 if stream.send(Ok(msg)).await.is_ok() {
                     self.pending_req
-                        .insert(idx, PendingRequest::Subscribe { stream });
+                        .insert(idx, PendingRequest::Subscribe { stream })
+                        .is_some()
+                        .then(|| panic!("Expected id to be unique."));
                 }
             }
             (PendingRequest::PublishOrSignal { sender }, ResponseType::SignalEntry { seq }) => {
@@ -499,6 +521,7 @@ impl BackgroundTask {
     }
 
     async fn send(&mut self, req: Request) -> Result<(), ()> {
+        debug!("Sending request via WebSocket {:?}.", req);
         let mut json = serde_json::to_vec(&req).expect("Request Serialization");
 
         self.websocket_tx.send_binary_mut(&mut json).await.unwrap();

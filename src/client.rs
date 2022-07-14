@@ -9,9 +9,8 @@ use crate::{
 };
 
 use clap::Parser;
-
 use influxdb::WriteQuery;
-
+use log::debug;
 use tokio::sync::{
     mpsc::{self, channel, Sender},
     oneshot,
@@ -140,14 +139,20 @@ impl Client {
     /// returning the value of the new value of the counter,
     /// or an error if the operation fails.
     pub async fn signal(&self, state: impl Into<Cow<'static, str>>) -> Result<u64, Error> {
-        let (sender, receiver) = oneshot::channel();
-
         let state = state.into().into_owned();
-        let cmd = Command::SignalEntry { state, sender };
+        debug!("Signaling state {:?}.", &state);
 
+        let (sender, receiver) = oneshot::channel();
+        let cmd = Command::SignalEntry {
+            state: state.clone(),
+            sender,
+        };
         self.cmd_tx.send(cmd).await.expect(BACKGROUND_RECEIVER);
+        debug!("Sent signal request for state {:?} to background.", state);
 
-        receiver.await.expect(BACKGROUND_SENDER)
+        let result = receiver.await.expect(BACKGROUND_SENDER);
+        debug!("Signaled state {:?} with result {:?}.", state, result);
+        result
     }
 
     /// ```barrier``` sets a barrier on the supplied ```state``` that fires when it reaches its target value (or higher).
@@ -156,18 +161,23 @@ impl Client {
         state: impl Into<Cow<'static, str>>,
         target: u64,
     ) -> Result<(), Error> {
-        let (sender, receiver) = oneshot::channel();
-
         let state = state.into().into_owned();
+        debug!("Setting barrier on {:?} with target {:?}", state, target);
+
+        let (sender, receiver) = oneshot::channel();
         let cmd = Command::Barrier {
-            state,
+            state: state.clone(),
             target,
             sender,
         };
-
         self.cmd_tx.send(cmd).await.expect(BACKGROUND_RECEIVER);
 
-        receiver.await.expect(BACKGROUND_SENDER)
+        let result = receiver.await.expect(BACKGROUND_SENDER);
+        debug!(
+            "Set barrier on {:?} with target {:?} and result {:?}",
+            state, target, result
+        );
+        result
     }
 
     /// ```wait_network_initialized``` waits for the sidecar to initialize the network,
